@@ -57,7 +57,7 @@ import {
 
 // Constantes
 const STORAGE_KEY = 'controle_horas_db_v3';
-const DEFAULT_SHEET_URL = 'https://script.google.com/macros/s/AKfycbxIw0GfO29tiYjsIGWTgit9HyNJD0dlZ9KQ3JqK7d5YTUS0csqOeYyDGT_Z7OTAgaV-/exec';
+const DEFAULT_SHEET_URL = 'https://script.google.com/macros/s/AKfycbxSSp3-DFjVzjNwMu-DdAzY8tDrF5ruroB3jEvnDo6qIU8vmsSDkFolf0y26gfzMWY1/exec';
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
 
 const App: React.FC = () => {
@@ -183,15 +183,15 @@ const App: React.FC = () => {
     try {
       await fetch(dbUrl, {
         method: 'POST',
-        mode: 'no-cors',
-        headers: { 'Content-Type': 'application/json' },
+        // mode: 'no-cors', <--- APAGUE OU COMENTE ESTA LINHA
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // <--- DEIXE EXATAMENTE ASSIM
         body: JSON.stringify({
           action: "SYNC_DATABASE",
           data: {
             sectors: currentData.sectors,
             employees: currentData.employees,
             requests: currentData.requests,
-            flattenedRequests // Array detalhado para preenchimento de células na planilha
+            flattenedRequests
           }
         }),
       });
