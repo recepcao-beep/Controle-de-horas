@@ -57,7 +57,7 @@ import {
 
 // Constantes
 const STORAGE_KEY = 'controle_horas_db_v3';
-const DEFAULT_SHEET_URL = 'https://script.google.com/macros/s/AKfycbw7IwV4c-dzVDe1gyOzgSM7N4MfSJ3PITjRTHBC-mzpfr7kX7YSU1boQGD7vcmP13Rx/exec';
+const DEFAULT_SHEET_URL = 'https://script.google.com/macros/s/AKfycbxIw0GfO29tiYjsIGWTgit9HyNJD0dlZ9KQ3JqK7d5YTUS0csqOeYyDGT_Z7OTAgaV-/exec';
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
 
 const App: React.FC = () => {
