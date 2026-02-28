@@ -51,7 +51,7 @@ export interface TimeRequest {
 }
 
 export interface AppState {
-  view: 'HOME' | 'SELECTION' | 'FLOW' | 'ADMIN' | 'EXPIRED';
+  view: 'HOME' | 'SELECTION' | 'FLOW' | 'ADMIN' | 'EXPIRED' | 'SUCCESS';
   flowType: EmployeeType | null;
   adminSubView: 'DASHBOARD' | 'SECTORS' | 'EMPLOYEES' | 'REQUESTS' | 'INTEGRATIONS';
 }
