@@ -58,7 +58,7 @@ import {
 
 // Constantes
 const STORAGE_KEY = 'controle_horas_db_v3';
-const DEFAULT_SHEET_URL = 'https://script.google.com/macros/s/AKfycbySCEMvlP076wPqrMonTEx2Ov-6Mo8FZyQqGqT_Iv41QyG76mLWqwxuvY2SPuL8uq_9/exec';
+const DEFAULT_SHEET_URL = 'https://script.google.com/a/macros/vilageinn.com.br/s/AKfycbySCEMvlP076wPqrMonTEx2Ov-6Mo8FZyQqGqT_Iv41QyG76mLWqwxuvY2SPuL8uq_9/exec';
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
 
 const App: React.FC = () => {
@@ -215,6 +215,7 @@ const App: React.FC = () => {
       const response = await fetch(dbUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain' },
+        redirect: 'follow',
         body: JSON.stringify({
           action: "EXPORT_PDF",
           data: {
@@ -268,6 +269,7 @@ const App: React.FC = () => {
       await fetch(dbUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain' },
+        redirect: 'follow',
         body: JSON.stringify({
           action: "SYNC_DATABASE",
           data: {
