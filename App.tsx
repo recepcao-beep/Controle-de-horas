@@ -58,7 +58,7 @@ import {
 
 // Constantes
 const STORAGE_KEY = 'controle_horas_db_v3';
-const DEFAULT_SHEET_URL = 'https://script.google.com/macros/s/AKfycbwpetzReqpAUJfy_mSqMh575nRGJpeDChf4B11iFX_hN48pezmntDmJ7lFoSgK2-NtD/exec';
+const DEFAULT_SHEET_URL = 'https://script.google.com/macros/s/AKfycbxIw0GfO29tiYjsIGWTgit9HyNJD0dlZ9KQ3JqK7d5YTUS0csqOeYyDGT_Z7OTAgaV-/exec';
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
 
 const App: React.FC = () => {
@@ -100,7 +100,7 @@ const App: React.FC = () => {
   const [editingRequestId, setEditingRequestId] = useState<string | null>(null);
   const [editJustification, setEditJustification] = useState('');
   
-  const lastSyncedDataRef = useRef<string>('');
+  const lastSyncedDataRef = useRef<string>('{"sectors":[],"employees":[],"requests":[]}');
   const [generatedLink, setGeneratedLink] = useState('');
 
   // --- Lógica de Dashboard (useMemo) ---
@@ -204,6 +204,40 @@ const App: React.FC = () => {
     }
   }, [dbUrl, folderRegId, folderFixoId]);
 
+  const exportToPDF = async () => {
+    if (!dbUrl) {
+      alert("Configure a URL do Apps Script primeiro.");
+      return;
+    }
+    
+    setIsSyncing(true);
+    try {
+      const response = await fetch(dbUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: JSON.stringify({
+          action: "EXPORT_PDF",
+          data: {
+            folderRegId,
+            folderFixoId
+          }
+        }),
+      });
+      
+      const result = await response.json();
+      if (result.success) {
+        alert("Fichas exportadas com sucesso!");
+      } else {
+        alert("Erro ao exportar: " + result.error);
+      }
+    } catch (error) {
+      console.error("Erro na exportação:", error);
+      alert("Erro ao comunicar com o servidor.");
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
   const syncDatabase = useCallback(async (currentData: { sectors: Sector[], employees: Employee[], requests: TimeRequest[] }) => {
     if (!dbUrl) return;
 
@@ -240,7 +274,9 @@ const App: React.FC = () => {
             sectors: currentData.sectors,
             employees: currentData.employees,
             requests: currentData.requests,
-            flattenedRequests
+            flattenedRequests,
+            folderRegId,
+            folderFixoId
           }
         }),
       });
@@ -759,8 +795,85 @@ function configuringGatilhoEdicao() {
   SpreadsheetApp.getUi().alert("Automação Ativada!");
 }
 
+function agruparSolicitacoesPorFuncionario(requests) {
+  const agrupado = {};
+  requests.forEach(req => {
+    const key = (req.employeeName || "").trim().toUpperCase() + "|" + 
+                (req.employeeType || "").trim().toUpperCase() + "|" + 
+                (req.sectorName || "").trim().toUpperCase();
+    if (!agrupado[key]) {
+      agrupado[key] = {
+        employeeName: req.employeeName,
+        employeeType: req.employeeType,
+        sectorName: req.sectorName,
+        records: []
+      };
+    }
+    let recs = typeof req.records === 'string' ? JSON.parse(req.records) : req.records;
+    agrupado[key].records = agrupado[key].records.concat(recs);
+  });
+
+  const resultado = [];
+
+  Object.keys(agrupado).forEach(key => {
+    let grupo = agrupado[key];
+    let records = grupo.records;
+    
+    // Remove registros vazios e ordena por data
+    records = records.filter(d => d.realEntry || d.realExit || d.punchEntry || d.punchExit);
+    records.sort((a, b) => (a.date > b.date) ? 1 : -1);
+
+    if ((grupo.employeeType || "").toUpperCase().trim() === "REGISTRADO") {
+      // Agrupar por semana (Segunda a Domingo)
+      const semanas = {};
+      records.forEach(rec => {
+        let partes = rec.date.split("-");
+        let d = new Date(partes[0], partes[1] - 1, partes[2], 12, 0, 0);
+        let diaSemana = d.getDay();
+        let diffParaSegunda = diaSemana === 0 ? -6 : 1 - diaSemana;
+        let segunda = new Date(d);
+        segunda.setDate(d.getDate() + diffParaSegunda);
+        let keySemana = segunda.getFullYear() + "-" + (segunda.getMonth() + 1) + "-" + segunda.getDate();
+        
+        if (!semanas[keySemana]) semanas[keySemana] = [];
+        
+        // Evitar duplicatas exatas de data na mesma semana (mantém o mais recente)
+        let idx = semanas[keySemana].findIndex(r => r.date === rec.date);
+        if (idx !== -1) {
+          semanas[keySemana][idx] = rec;
+        } else {
+          semanas[keySemana].push(rec);
+        }
+      });
+      
+      Object.keys(semanas).forEach(keySemana => {
+        resultado.push({
+          employeeName: grupo.employeeName,
+          employeeType: grupo.employeeType,
+          sectorName: grupo.sectorName,
+          records: semanas[keySemana]
+        });
+      });
+
+    } else {
+      // FIXO: Agrupar a cada 7 registros (limite da ficha)
+      for (let i = 0; i < records.length; i += 7) {
+        resultado.push({
+          employeeName: grupo.employeeName,
+          employeeType: grupo.employeeType,
+          sectorName: grupo.sectorName,
+          records: records.slice(i, i + 7)
+        });
+      }
+    }
+  });
+
+  return resultado;
+}
+
 function processarHEsAprovadas(ss, requests) {
   const aprovados = requests.filter(r => (r.status || "").toUpperCase().trim() === "APROVADO");
+  const agrupados = agruparSolicitacoesPorFuncionario(aprovados);
 
   // ABA REGISTRADO
   const abaReg = ss.getSheetByName("HE - REGISTRADO");
@@ -770,7 +883,7 @@ function processarHEsAprovadas(ss, requests) {
     let formulas = range.getFormulas(); 
     limparMatriz(matriz, "REGISTRADO");
     
-    aprovados.filter(r => r.employeeType.toUpperCase().trim() === "REGISTRADO").forEach(req => {
+    agrupados.filter(r => r.employeeType.toUpperCase().trim() === "REGISTRADO").forEach(req => {
       let rIdx = localizarFichaVaziaNaMatriz(matriz, 0, 1);
       if (rIdx !== -1) {
         matriz[rIdx][1] = req.employeeName;
@@ -790,7 +903,7 @@ function processarHEsAprovadas(ss, requests) {
     let formulas = range.getFormulas(); 
     limparMatriz(matriz, "FIXO");
     
-    aprovados.filter(r => r.employeeType.toUpperCase().trim() === "FIXO").forEach(func => {
+    agrupados.filter(r => r.employeeType.toUpperCase().trim() === "FIXO").forEach(func => {
       let fIdx = -1; let colBase = -1; 
       let nomeSetorAlvo = (func.sectorName || "").toUpperCase().trim();
       for (let i = 0; i < matriz.length; i++) {
@@ -1320,7 +1433,7 @@ function gerarNovoArquivoSheets(nomeArquivo, rangeOrigem, pastaDestino) {
                   <input type="text" className="w-full p-4 border rounded-xl bg-white text-black outline-none text-base" value={dbUrl} onChange={(e) => setDbUrl(e.target.value)} />
                   <div className="flex flex-col md:flex-row gap-3">
                     <button onClick={() => loadDatabase()} className="flex-1 bg-white border border-blue-600 text-blue-600 px-6 py-4 rounded-xl font-bold active:bg-blue-50 transition">Importar</button>
-                    <button onClick={() => syncDatabase({ sectors, employees, requests })} className="flex-1 bg-blue-600 text-white px-8 py-4 rounded-xl font-bold shadow-lg active:scale-95 transition">Exportar</button>
+                    <button onClick={exportToPDF} className="flex-1 bg-blue-600 text-white px-8 py-4 rounded-xl font-bold shadow-lg active:scale-95 transition">Exportar</button>
                   </div>
                 </div>
 

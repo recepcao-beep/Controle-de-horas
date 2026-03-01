@@ -27,6 +27,14 @@ function doPost(e) {
     if (body.action === "SYNC_DATABASE") {
       const ss = SpreadsheetApp.getActiveSpreadsheet();
       
+      // Salvar IDs das pastas se fornecidos
+      if (body.data.folderRegId) {
+        PropertiesService.getScriptProperties().setProperty('FOLDER_REG_ID', body.data.folderRegId);
+      }
+      if (body.data.folderFixoId) {
+        PropertiesService.getScriptProperties().setProperty('FOLDER_FIXO_ID', body.data.folderFixoId);
+      }
+      
       // Atualiza as abas principais usadas pelo React
       updateSheet(ss, "Setores", body.data.sectors);
       updateSheet(ss, "Funcionarios", body.data.employees);
@@ -41,6 +49,12 @@ function doPost(e) {
       // Isso garante que a visualização na planilha fique atualizada
       processarHEsAprovadas(ss, body.data.requests);
       
+      return ContentService.createTextOutput(JSON.stringify({ success: true }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+    
+    if (body.action === "EXPORT_PDF") {
+      exportarFolhasSextaFeira(body.data.folderRegId, body.data.folderFixoId);
       return ContentService.createTextOutput(JSON.stringify({ success: true }))
         .setMimeType(ContentService.MimeType.JSON);
     }
@@ -151,10 +165,11 @@ function executarFechamentoSemanal() {
  * ============================================================
  */
 
-function exportarFolhasSextaFeira() {
+function exportarFolhasSextaFeira(paramFolderRegId, paramFolderFixoId) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const PASTA_REGISTRADO_ID = "1OGOxVmi2nEwI47HP9l48VdVBKQeJTVqm";
-  const PASTA_FIXO_ID = "1RzzDCHznw97QxwDLh_qvf8NE8yKPNdWU";
+  const props = PropertiesService.getScriptProperties();
+  const PASTA_REGISTRADO_ID = paramFolderRegId || props.getProperty('FOLDER_REG_ID') || "1OGOxVmi2nEwI47HP9l48VdVBKQeJTVqm";
+  const PASTA_FIXO_ID = paramFolderFixoId || props.getProperty('FOLDER_FIXO_ID') || "1RzzDCHznw97QxwDLh_qvf8NE8yKPNdWU";
 
   // Nome da pasta do dia (Ex: 24-02)
   const dataPasta = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd-MM");
@@ -289,8 +304,85 @@ function gerarNovoArquivoSheets(nomeArquivo, rangeOrigem, pastaDestino) {
  * ============================================================
  */
 
+function agruparSolicitacoesPorFuncionario(requests) {
+  const agrupado = {};
+  requests.forEach(req => {
+    const key = (req.employeeName || "").trim().toUpperCase() + "|" + 
+                (req.employeeType || "").trim().toUpperCase() + "|" + 
+                (req.sectorName || "").trim().toUpperCase();
+    if (!agrupado[key]) {
+      agrupado[key] = {
+        employeeName: req.employeeName,
+        employeeType: req.employeeType,
+        sectorName: req.sectorName,
+        records: []
+      };
+    }
+    let recs = typeof req.records === 'string' ? JSON.parse(req.records) : req.records;
+    agrupado[key].records = agrupado[key].records.concat(recs);
+  });
+
+  const resultado = [];
+
+  Object.keys(agrupado).forEach(key => {
+    let grupo = agrupado[key];
+    let records = grupo.records;
+    
+    // Remove registros vazios e ordena por data
+    records = records.filter(d => d.realEntry || d.realExit || d.punchEntry || d.punchExit);
+    records.sort((a, b) => (a.date > b.date) ? 1 : -1);
+
+    if ((grupo.employeeType || "").toUpperCase().trim() === "REGISTRADO") {
+      // Agrupar por semana (Segunda a Domingo)
+      const semanas = {};
+      records.forEach(rec => {
+        let partes = rec.date.split("-");
+        let d = new Date(partes[0], partes[1] - 1, partes[2], 12, 0, 0);
+        let diaSemana = d.getDay();
+        let diffParaSegunda = diaSemana === 0 ? -6 : 1 - diaSemana;
+        let segunda = new Date(d);
+        segunda.setDate(d.getDate() + diffParaSegunda);
+        let keySemana = segunda.getFullYear() + "-" + (segunda.getMonth() + 1) + "-" + segunda.getDate();
+        
+        if (!semanas[keySemana]) semanas[keySemana] = [];
+        
+        // Evitar duplicatas exatas de data na mesma semana (mantém o mais recente)
+        let idx = semanas[keySemana].findIndex(r => r.date === rec.date);
+        if (idx !== -1) {
+          semanas[keySemana][idx] = rec;
+        } else {
+          semanas[keySemana].push(rec);
+        }
+      });
+      
+      Object.keys(semanas).forEach(keySemana => {
+        resultado.push({
+          employeeName: grupo.employeeName,
+          employeeType: grupo.employeeType,
+          sectorName: grupo.sectorName,
+          records: semanas[keySemana]
+        });
+      });
+
+    } else {
+      // FIXO: Agrupar a cada 7 registros (limite da ficha)
+      for (let i = 0; i < records.length; i += 7) {
+        resultado.push({
+          employeeName: grupo.employeeName,
+          employeeType: grupo.employeeType,
+          sectorName: grupo.sectorName,
+          records: records.slice(i, i + 7)
+        });
+      }
+    }
+  });
+
+  return resultado;
+}
+
 function processarHEsAprovadas(ss, requests) {
   const aprovados = requests.filter(r => (r.status || "").toUpperCase().trim() === "APROVADO");
+  const agrupados = agruparSolicitacoesPorFuncionario(aprovados);
 
   const abaReg = ss.getSheetByName("HE - REGISTRADO");
   if (abaReg) {
@@ -298,8 +390,8 @@ function processarHEsAprovadas(ss, requests) {
     let matriz = range.getValues();
     let formulas = range.getFormulas(); 
     limparMatriz(matriz, "REGISTRADO");
-    let regs = aprovados.filter(r => r.employeeType.toUpperCase().trim() === "REGISTRADO");
-    regs.forEach(req => {
+    
+    agrupados.filter(r => r.employeeType.toUpperCase().trim() === "REGISTRADO").forEach(req => {
       let rIdx = localizarFichaVaziaNaMatriz(matriz, 0, 1);
       if (rIdx !== -1) {
         matriz[rIdx][1] = req.employeeName;
@@ -317,8 +409,8 @@ function processarHEsAprovadas(ss, requests) {
     let matriz = range.getValues();
     let formulas = range.getFormulas(); 
     limparMatriz(matriz, "FIXO");
-    const fixos = aprovados.filter(r => r.employeeType.toUpperCase().trim() === "FIXO");
-    fixos.forEach(func => {
+    
+    agrupados.filter(r => r.employeeType.toUpperCase().trim() === "FIXO").forEach(func => {
       let fIdx = -1; let colBase = -1; 
       let nomeSetorAlvo = (func.sectorName || "").toUpperCase().trim();
       for (let i = 0; i < matriz.length; i++) {
