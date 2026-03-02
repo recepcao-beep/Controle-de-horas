@@ -57,7 +57,7 @@ import {
 } from './utils';
 
 // Constantes
-const STORAGE_KEY = 'controle_horas_db_v3';
+const STORAGE_KEY = 'controle_horas_db_v4';
 const DEFAULT_SHEET_URL = 'https://script.google.com/macros/s/AKfycbygZx_SPJr3h_HzxiLGyXhOcl-t65kc7nUl-Togwo0VwQh8NADsnSS4Yh8cfPfJz9eY/exec';
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
 
