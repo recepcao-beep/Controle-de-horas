@@ -7,7 +7,8 @@ export enum EmployeeType {
 export enum RequestStatus {
   PENDENTE = 'PENDENTE',
   APROVADO = 'APROVADO',
-  REJEITADO = 'REJEITADO'
+  REJEITADO = 'REJEITADO',
+  DELETADO = 'DELETADO'
 }
 
 export interface Sector {

@@ -36,18 +36,19 @@ function doPost(e) {
       }
       
       // Atualiza as abas principais usadas pelo React
-      updateSheet(ss, "Setores", body.data.sectors);
-      updateSheet(ss, "Funcionarios", body.data.employees);
-      updateSheet(ss, "Solicitacoes", body.data.requests);
+      if (body.data.isAdmin) {
+        updateSheet(ss, "Setores", body.data.sectors);
+        updateSheet(ss, "Funcionarios", body.data.employees);
+      }
+      mergeRequests(ss, "Solicitacoes", body.data.requests);
       
       // Atualiza a aba de registros detalhados (opcional, para relatórios na planilha)
-      if (body.data.flattenedRequests) {
-        updateSheet(ss, "Registros_Detalhados", body.data.flattenedRequests);
-      }
+      rebuildRegistrosDetalhados(ss);
       
       // Executa a lógica de distribuição de dados nas fichas se houver aprovados
       // Isso garante que a visualização na planilha fique atualizada
-      processarHEsAprovadas(ss, body.data.requests);
+      const allRequests = getSheetData(ss, "Solicitacoes");
+      processarHEsAprovadas(ss, allRequests);
       
       return ContentService.createTextOutput(JSON.stringify({ success: true }))
         .setMimeType(ContentService.MimeType.JSON);
@@ -62,6 +63,38 @@ function doPost(e) {
     return ContentService.createTextOutput(JSON.stringify({ success: false, error: error.message }))
       .setMimeType(ContentService.MimeType.JSON);
   }
+}
+
+function rebuildRegistrosDetalhados(ss) {
+  const requests = getSheetData(ss, "Solicitacoes");
+  const flattened = [];
+  
+  requests.forEach(req => {
+    let recs = typeof req.records === 'string' ? JSON.parse(req.records) : req.records;
+    if (Array.isArray(recs)) {
+      recs.forEach(rec => {
+        flattened.push({
+          id_solicitacao: req.id,
+          funcionario: req.employeeName,
+          tipo: req.employeeType,
+          setor: req.sectorName,
+          data_semana: req.weekStarting,
+          status: req.status,
+          valor_total_pedido: req.calculatedValue,
+          data_registro: rec.date,
+          entrada_real: rec.realEntry,
+          entrada_ponto: rec.punchEntry,
+          saida_ponto: rec.punchExit,
+          saida_real: rec.realExit,
+          folga_vendida: rec.isFolgaVendida ? "SIM" : "NÃO",
+          criado_em: req.createdAt,
+          justificativa_edicao: req.editJustification || ''
+        });
+      });
+    }
+  });
+  
+  updateSheet(ss, "Registros_Detalhados", flattened);
 }
 
 function updateSheet(ss, sheetName, dataArray) {
@@ -98,6 +131,55 @@ function updateSheet(ss, sheetName, dataArray) {
   // Escreve cabeçalhos e dados
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
   sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
+}
+
+function mergeRequests(ss, sheetName, newRequests) {
+  let sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName);
+  }
+  
+  if (!newRequests || newRequests.length === 0) return;
+  
+  const headers = Object.keys(newRequests[0]);
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  }
+  
+  const existingData = sheet.getDataRange().getValues();
+  const sheetHeaders = existingData[0] || headers;
+  const idIndex = sheetHeaders.indexOf("id");
+  
+  const existingIds = {};
+  if (existingData.length > 1 && idIndex !== -1) {
+    for (let i = 1; i < existingData.length; i++) {
+      existingIds[existingData[i][idIndex]] = i + 1;
+    }
+  }
+  
+  let backupSheet = ss.getSheetByName("BACKUP");
+  if (!backupSheet) {
+    backupSheet = ss.insertSheet("BACKUP");
+    backupSheet.getRange(1, 1, 1, sheetHeaders.length).setValues([sheetHeaders]);
+  } else if (backupSheet.getLastRow() === 0) {
+    backupSheet.getRange(1, 1, 1, sheetHeaders.length).setValues([sheetHeaders]);
+  }
+  
+  newRequests.forEach(req => {
+    const rowData = sheetHeaders.map(h => {
+      let val = req[h];
+      return typeof val === 'object' ? JSON.stringify(val) : val;
+    });
+    
+    if (idIndex !== -1 && existingIds[req.id]) {
+      // Update existing
+      sheet.getRange(existingIds[req.id], 1, 1, sheetHeaders.length).setValues([rowData]);
+    } else {
+      // Append new
+      sheet.appendRow(rowData);
+      backupSheet.appendRow(rowData);
+    }
+  });
 }
 
 /**
@@ -139,9 +221,19 @@ function executarFechamentoSemanal() {
     return;
   }
 
-  // 2. Limpa o banco de dados (Solicitacoes)
+  // 2. Backup e Limpa o banco de dados (Solicitacoes)
   const abaSolicitacoes = ss.getSheetByName("Solicitacoes");
   if (abaSolicitacoes && abaSolicitacoes.getLastRow() > 1) {
+    let abaBackup = ss.getSheetByName("BACKUP");
+    if (!abaBackup) {
+      abaBackup = ss.insertSheet("BACKUP");
+      let headers = abaSolicitacoes.getRange(1, 1, 1, abaSolicitacoes.getLastColumn()).getValues();
+      abaBackup.getRange(1, 1, 1, headers[0].length).setValues(headers);
+    }
+    
+    let dadosParaBackup = abaSolicitacoes.getRange(2, 1, abaSolicitacoes.getLastRow() - 1, abaSolicitacoes.getLastColumn()).getValues();
+    abaBackup.getRange(abaBackup.getLastRow() + 1, 1, dadosParaBackup.length, dadosParaBackup[0].length).setValues(dadosParaBackup);
+
     abaSolicitacoes.getRange(2, 1, abaSolicitacoes.getLastRow() - 1, abaSolicitacoes.getLastColumn()).clearContent();
   }
 
@@ -220,7 +312,7 @@ function processarExportacaoIndividual(ss, nomeAba, tipo, pastaDestino) {
       // Verifica se há dados no bloco antes de exportar
       let temDados = false;
       for (let r = 0; r < saltoLinhas; r++) {
-        if (dados[i+r] && ((dados[i+r][1] && (dados[i+r][0]||"").toString().includes("NOME")) || (dados[i+r][8] && (dados[i+r][7]||"").toString().includes("NOME")))) {
+        if (dados[i+r] && ((dados[i+r][1] && (dados[i+r][0]||"").toString().toUpperCase().includes("NOME")) || (dados[i+r][8] && (dados[i+r][7]||"").toString().toUpperCase().includes("NOME")))) {
           temDados = true; break;
         }
       }
@@ -254,7 +346,8 @@ function processarExportacaoIndividual(ss, nomeAba, tipo, pastaDestino) {
       }
     }
 
-    let rangeFolha = abaOrigem.getRange(i + 1, 1, saltoLinhas, 11); 
+    let numCols = (tipo === "FIXO") ? 13 : 11;
+    let rangeFolha = abaOrigem.getRange(i + 1, 1, saltoLinhas, numCols); 
     gerarNovoArquivoSheets(nomeArquivo, rangeFolha, pastaDestino);
   }
 }
@@ -332,49 +425,49 @@ function agruparSolicitacoesPorFuncionario(requests) {
     records = records.filter(d => d.realEntry || d.realExit || d.punchEntry || d.punchExit);
     records.sort((a, b) => (a.date > b.date) ? 1 : -1);
 
-    if ((grupo.employeeType || "").toUpperCase().trim() === "REGISTRADO") {
-      // Agrupar por semana (Segunda a Domingo)
-      const semanas = {};
-      records.forEach(rec => {
-        let partes = rec.date.split("-");
-        let d = new Date(partes[0], partes[1] - 1, partes[2], 12, 0, 0);
-        let diaSemana = d.getDay();
-        let diffParaSegunda = diaSemana === 0 ? -6 : 1 - diaSemana;
-        let segunda = new Date(d);
-        segunda.setDate(d.getDate() + diffParaSegunda);
-        let keySemana = segunda.getFullYear() + "-" + (segunda.getMonth() + 1) + "-" + segunda.getDate();
-        
-        if (!semanas[keySemana]) semanas[keySemana] = [];
-        
-        // Evitar duplicatas exatas de data na mesma semana (mantém o mais recente)
-        let idx = semanas[keySemana].findIndex(r => r.date === rec.date);
-        if (idx !== -1) {
-          semanas[keySemana][idx] = rec;
-        } else {
-          semanas[keySemana].push(rec);
-        }
-      });
+    // Agrupar por semana (Segunda a Domingo) para TODOS
+    const semanas = {};
+    records.forEach(rec => {
+      let partes = rec.date.split("-");
+      let d = new Date(partes[0], partes[1] - 1, partes[2], 12, 0, 0);
+      let diaSemana = d.getDay();
+      let diffParaSegunda = diaSemana === 0 ? -6 : 1 - diaSemana;
+      let segunda = new Date(d);
+      segunda.setDate(d.getDate() + diffParaSegunda);
+      let keySemana = segunda.getFullYear() + "-" + (segunda.getMonth() + 1) + "-" + segunda.getDate();
       
-      Object.keys(semanas).forEach(keySemana => {
-        resultado.push({
-          employeeName: grupo.employeeName,
-          employeeType: grupo.employeeType,
-          sectorName: grupo.sectorName,
-          records: semanas[keySemana]
-        });
-      });
-
-    } else {
-      // FIXO: Agrupar a cada 7 registros (limite da ficha)
-      for (let i = 0; i < records.length; i += 7) {
-        resultado.push({
-          employeeName: grupo.employeeName,
-          employeeType: grupo.employeeType,
-          sectorName: grupo.sectorName,
-          records: records.slice(i, i + 7)
-        });
+      if (!semanas[keySemana]) semanas[keySemana] = [];
+      
+      // Evitar duplicatas exatas de data na mesma semana (mantém o mais recente)
+      let idx = semanas[keySemana].findIndex(r => r.date === rec.date);
+      if (idx !== -1) {
+        semanas[keySemana][idx] = rec;
+      } else {
+        semanas[keySemana].push(rec);
       }
-    }
+    });
+    
+    Object.keys(semanas).forEach(keySemana => {
+      let recsSemana = semanas[keySemana];
+      if ((grupo.employeeType || "").toUpperCase().trim() === "REGISTRADO") {
+        resultado.push({
+          employeeName: grupo.employeeName,
+          employeeType: grupo.employeeType,
+          sectorName: grupo.sectorName,
+          records: recsSemana
+        });
+      } else {
+        // FIXO: Agrupar a cada 7 registros (limite da ficha) dentro da mesma semana
+        for (let i = 0; i < recsSemana.length; i += 7) {
+          resultado.push({
+            employeeName: grupo.employeeName,
+            employeeType: grupo.employeeType,
+            sectorName: grupo.sectorName,
+            records: recsSemana.slice(i, i + 7)
+          });
+        }
+      }
+    });
   });
 
   return resultado;
