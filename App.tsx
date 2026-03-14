@@ -60,7 +60,7 @@ import {
 
 // Constantes
 const STORAGE_KEY = 'controle_horas_db_v3';
-const DEFAULT_SHEET_URL = 'https://script.google.com/macros/s/AKfycbzDjdO5kgxKz_E_ezLg0ylPcy55COELzzXKLc-SCjS_DCgvu2F4Sf5IKAqgdporrUv8/exec';
+const DEFAULT_SHEET_URL = 'https://script.google.com/macros/s/AKfycbwKt53aqiudrwBXEyKspPm5KMUCE1_4bt8Vg-F7HDBrHWYtfdnaLwrfI-z6MOv2Gq3r/exec';
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
 
 const App: React.FC = () => {
@@ -172,22 +172,26 @@ const App: React.FC = () => {
       const data = await response.json();
       
       if (data && !data.error) {
-        setSectors(data.sectors || []);
-        setEmployees(data.employees || []);
+        const uniqueSectors = Array.from(new Map((data.sectors || []).map((s: any) => [s.id, s])).values()) as Sector[];
+        const uniqueEmployees = Array.from(new Map((data.employees || []).map((e: any) => [e.id, e])).values()) as Employee[];
         const activeRequests = (data.requests || []).filter((r: TimeRequest) => r.status !== RequestStatus.DELETADO);
-        setRequests(activeRequests);
+        const uniqueRequests = Array.from(new Map(activeRequests.map((r: any) => [r.id, r])).values()) as TimeRequest[];
+
+        setSectors(uniqueSectors);
+        setEmployees(uniqueEmployees);
+        setRequests(uniqueRequests);
         if (urlToUse) setDbUrl(urlToUse);
         
         lastSyncedDataRef.current = JSON.stringify({
-          sectors: data.sectors || [],
-          employees: data.employees || [],
-          requests: activeRequests
+          sectors: uniqueSectors,
+          employees: uniqueEmployees,
+          requests: uniqueRequests
         });
 
         localStorage.setItem(STORAGE_KEY, JSON.stringify({
-          sectors: data.sectors || [],
-          employees: data.employees || [],
-          requests: activeRequests,
+          sectors: uniqueSectors,
+          employees: uniqueEmployees,
+          requests: uniqueRequests,
           dbUrl: targetUrl,
           folderRegId,
           folderFixoId
@@ -201,18 +205,22 @@ const App: React.FC = () => {
       if (localData) {
         try {
           const parsed = JSON.parse(localData);
-          setSectors(parsed.sectors || []);
-          setEmployees(parsed.employees || []);
+          const uniqueSectors = Array.from(new Map((parsed.sectors || []).map((s: any) => [s.id, s])).values()) as Sector[];
+          const uniqueEmployees = Array.from(new Map((parsed.employees || []).map((e: any) => [e.id, e])).values()) as Employee[];
           const activeLocalRequests = (parsed.requests || []).filter((r: TimeRequest) => r.status !== RequestStatus.DELETADO);
-          setRequests(activeLocalRequests);
+          const uniqueRequests = Array.from(new Map(activeLocalRequests.map((r: any) => [r.id, r])).values()) as TimeRequest[];
+
+          setSectors(uniqueSectors);
+          setEmployees(uniqueEmployees);
+          setRequests(uniqueRequests);
           if (parsed.dbUrl) setDbUrl(parsed.dbUrl);
           if (parsed.folderRegId) setFolderRegId(parsed.folderRegId);
           if (parsed.folderFixoId) setFolderFixoId(parsed.folderFixoId);
           
           lastSyncedDataRef.current = JSON.stringify({
-            sectors: parsed.sectors || [],
-            employees: parsed.employees || [],
-            requests: activeLocalRequests
+            sectors: uniqueSectors,
+            employees: uniqueEmployees,
+            requests: uniqueRequests
           });
         } catch (e) {
           // Ignora erro de parse local
@@ -678,7 +686,9 @@ function doGet(e) {
 }
 
 function doPost(e) {
+  const lock = LockService.getScriptLock();
   try {
+    lock.waitLock(10000); // Aguarda até 10 segundos por um lock
     // O React envia como text/plain para evitar o CORS preflight
     const body = JSON.parse(e.postData.contents);
     
@@ -698,7 +708,7 @@ function doPost(e) {
         updateSheet(ss, "Setores", body.data.sectors);
         updateSheet(ss, "Funcionarios", body.data.employees);
       }
-      mergeRequests(ss, "Solicitacoes", body.data.requests);
+      mergeRequests(ss, "Solicitacoes", body.data.requests, body.data.isAdmin);
       
       // Atualiza a aba de registros detalhados (opcional, para relatórios na planilha)
       rebuildRegistrosDetalhados(ss);
@@ -720,6 +730,8 @@ function doPost(e) {
   } catch (error) {
     return ContentService.createTextOutput(JSON.stringify({ success: false, error: error.message }))
       .setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    lock.releaseLock();
   }
 }
 
@@ -791,7 +803,7 @@ function updateSheet(ss, sheetName, dataArray) {
   sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
 }
 
-function mergeRequests(ss, sheetName, newRequests) {
+function mergeRequests(ss, sheetName, newRequests, isAdmin) {
   let sheet = ss.getSheetByName(sheetName);
   if (!sheet) {
     sheet = ss.insertSheet(sheetName);
@@ -807,6 +819,7 @@ function mergeRequests(ss, sheetName, newRequests) {
   const existingData = sheet.getDataRange().getValues();
   const sheetHeaders = existingData[0] || headers;
   const idIndex = sheetHeaders.indexOf("id");
+  const statusIndex = sheetHeaders.indexOf("status");
   
   const existingIds = {};
   if (existingData.length > 1 && idIndex !== -1) {
@@ -831,11 +844,28 @@ function mergeRequests(ss, sheetName, newRequests) {
     
     if (idIndex !== -1 && existingIds[req.id]) {
       // Update existing
-      sheet.getRange(existingIds[req.id], 1, 1, sheetHeaders.length).setValues([rowData]);
+      if (isAdmin) {
+        const existingRow = existingIds[req.id];
+        let existingStatus = "PENDENTE";
+        if (statusIndex !== -1 && existingRow <= existingData.length) {
+          existingStatus = existingData[existingRow - 1][statusIndex];
+        }
+        
+        // Se a solicitação já foi aprovada/rejeitada no servidor,
+        // não deixe um cliente com estado "PENDENTE" sobrescrever isso.
+        if (existingStatus !== "PENDENTE" && req.status === "PENDENTE") {
+          // Ignora a atualização para não apagar o status aprovado
+        } else {
+          sheet.getRange(existingRow, 1, 1, sheetHeaders.length).setValues([rowData]);
+        }
+      }
     } else {
       // Append new
       sheet.appendRow(rowData);
       backupSheet.appendRow(rowData);
+      if (idIndex !== -1 && req.id) {
+        existingIds[req.id] = sheet.getLastRow();
+      }
     }
   });
 }
@@ -1585,7 +1615,7 @@ function testeManual() {
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 bg-gray-50 dark:bg-gray-900 p-6 rounded-2xl">
                   <input type="text" placeholder="Nome" className="p-4 border dark:border-gray-700 rounded-xl bg-white dark:bg-gray-800 text-black dark:text-white text-base focus:border-blue-500 outline-none" value={newSec.name} onChange={(e) => setNewSec({ ...newSec, name: e.target.value })} />
                   <input type="number" placeholder="Valor Hora" className="p-4 border dark:border-gray-700 rounded-xl bg-white dark:bg-gray-800 text-black dark:text-white text-base focus:border-blue-500 outline-none" value={newSec.fixedRate || ''} onChange={(e) => setNewSec({ ...newSec, fixedRate: parseFloat(e.target.value) })} />
-                  <button onClick={() => { if(newSec.name) { setSectors([...sectors, {...newSec, id: Date.now().toString()}]); setNewSec({name: '', fixedRate: 0}); } }} className="bg-blue-600 text-white font-bold rounded-xl py-3 active:scale-95 transition">Adicionar</button>
+                  <button onClick={() => { if(newSec.name) { setSectors([...sectors, {...newSec, id: Math.random().toString(36).substr(2, 9)}]); setNewSec({name: '', fixedRate: 0}); } }} className="bg-blue-600 text-white font-bold rounded-xl py-3 active:scale-95 transition">Adicionar</button>
                 </div>
                 {/* Responsive List: Card on Mobile, Table on Desktop */}
                 <div className="hidden md:block">
@@ -1621,7 +1651,7 @@ function testeManual() {
                             setEmployees(employees.map(e => e.id === editingEmployeeId ? { ...e, ...newEmpData } : e));
                             setEditingEmployeeId(null);
                           } else {
-                            setEmployees([...employees, {...newEmpData, id: Date.now().toString()}]); 
+                            setEmployees([...employees, {...newEmpData, id: Math.random().toString(36).substr(2, 9)}]); 
                           }
                           setNewEmpData({name: '', sectorId: '', salary: 0, monthlyHours: 220, type: EmployeeType.REGISTRADO}); 
                         } 
