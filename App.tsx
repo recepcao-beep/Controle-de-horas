@@ -1534,11 +1534,16 @@ function preencherColunaAERegistros(matriz, formulas, linhaInicio, records) {
   let dataRef = new Date(dataRefOriginal);
   dataRef.setDate(dataRefOriginal.getDate() + diffParaSegunda);
   
+  const diasDaSemana = ["SEGUNDA", "TERÇA", "QUARTA", "QUINTA", "SEXTA", "SÁBADO", "DOMINGO"];
+  
   for (let i = 0; i < 7; i++) {
     let r = linhaInicio + i;
     if (!matriz[r]) continue;
     let dataLoop = new Date(dataRef);
     dataLoop.setDate(dataRef.getDate() + i);
+    
+    // Preenche a coluna 0 com o dia da semana
+    matriz[r][0] = diasDaSemana[i];
     
     let sBusca = Utilities.formatDate(dataLoop, Session.getScriptTimeZone(), "yyyy-MM-dd");
     let reg = horas.find(h => h.date === sBusca);
