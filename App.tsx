@@ -27,7 +27,11 @@ import {
   Calendar,
   Menu,
   Moon,
-  Sun
+  Sun,
+  Folder,
+  FileText,
+  Grid,
+  List
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -60,7 +64,7 @@ import {
 
 // Constantes
 const STORAGE_KEY = 'controle_horas_db_v3';
-const DEFAULT_SHEET_URL = 'https://script.google.com/macros/s/AKfycbwKt53aqiudrwBXEyKspPm5KMUCE1_4bt8Vg-F7HDBrHWYtfdnaLwrfI-z6MOv2Gq3r/exec';
+const DEFAULT_SHEET_URL = 'https://script.google.com/macros/s/AKfycbyrqGVolBmkd1CYPXyw2poaS3JdO4i6P702u8CPR8HlTJg2vUWEj_WxKGO4KND515WD/exec';
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
 
 const App: React.FC = () => {
@@ -71,8 +75,22 @@ const App: React.FC = () => {
   const [dbUrl, setDbUrl] = useState(DEFAULT_SHEET_URL);
   const [folderRegId, setFolderRegId] = useState('1OGOxVmi2nEwI47HP9l48VdVBKQeJTVqm');
   const [folderFixoId, setFolderFixoId] = useState('1RzzDCHznw97QxwDLh_qvf8NE8yKPNdWU');
+  
+  const extractFolderId = (input: string) => {
+    if (!input) return '';
+    const match = input.match(/[-\w]{15,}/);
+    return match ? match[0] : input;
+  };
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [driveFiles, setDriveFiles] = useState<{folders: any[], files: any[]}>({folders: [], files: []});
+  const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
+  const [folderHistory, setFolderHistory] = useState<{id: string, name: string}[]>([]);
+  const [isLoadingFiles, setIsLoadingFiles] = useState(false);
+  const [alertMessage, setAlertMessage] = useState<string | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<{ message: string, onConfirm: () => void } | null>(null);
+  const [fileViewMode, setFileViewMode] = useState<'list' | 'grid'>('list');
+  const [folderCache, setFolderCache] = useState<Record<string, {folders: any[], files: any[]}>>({});
   const hasLoadedRef = useRef(false);
 
   // --- Estado Global da Navegação ---
@@ -213,7 +231,6 @@ const App: React.FC = () => {
           setSectors(uniqueSectors);
           setEmployees(uniqueEmployees);
           setRequests(uniqueRequests);
-          if (parsed.dbUrl) setDbUrl(parsed.dbUrl);
           if (parsed.folderRegId) setFolderRegId(parsed.folderRegId);
           if (parsed.folderFixoId) setFolderFixoId(parsed.folderFixoId);
           
@@ -243,9 +260,111 @@ const App: React.FC = () => {
     }
   }, [dbUrl, folderRegId, folderFixoId]);
 
+  const executarFechamentoSemanal = async () => {
+    if (!dbUrl) {
+      setAlertMessage("Configure a URL do Apps Script primeiro.");
+      return;
+    }
+    
+    setConfirmDialog({
+      message: 'CONFIRMAÇÃO DE FECHAMENTO\n\nIsso irá exportar as FOLHAS para o Drive e LIMPAR a aba de Solicitações. Deseja continuar?',
+      onConfirm: async () => {
+        setIsSyncing(true);
+        try {
+          const response = await fetch(dbUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain' },
+            redirect: 'follow',
+            body: JSON.stringify({
+              action: "FECHAMENTO_SEMANAL",
+              data: {
+                folderRegId,
+                folderFixoId
+              }
+            }),
+          });
+          
+          const result = await response.json();
+          if (result.success) {
+            setAlertMessage("Fechamento concluído com sucesso!");
+            loadDatabase(); // Reload data to clear requests locally
+          } else {
+            setAlertMessage("Erro no fechamento: " + (result.error || "Verifique se as pastas do Google Drive estão configuradas corretamente e se você tem permissão de acesso."));
+          }
+        } catch (error) {
+          console.error("Erro ao executar fechamento:", error);
+          setAlertMessage("Falha na comunicação com o servidor.");
+        } finally {
+          setIsSyncing(false);
+        }
+      }
+    });
+  };
+
+  const fetchDriveFiles = async (folderId: string, folderName: string) => {
+    if (!dbUrl) {
+      setAlertMessage("Configure a URL do Apps Script primeiro.");
+      return;
+    }
+    
+    // Check cache first for faster navigation
+    if (folderCache[folderId]) {
+      setDriveFiles(folderCache[folderId]);
+      setCurrentFolderId(folderId);
+      setFolderHistory(prev => {
+        const index = prev.findIndex(f => f.id === folderId);
+        if (index !== -1) {
+          return prev.slice(0, index + 1);
+        } else {
+          return [...prev, { id: folderId, name: folderName }];
+        }
+      });
+      return;
+    }
+
+    setIsLoadingFiles(true);
+    try {
+      const response = await fetch(dbUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        redirect: 'follow',
+        body: JSON.stringify({
+          action: "LIST_FILES",
+          data: { folderId }
+        }),
+      });
+      
+      const result = await response.json();
+      if (result.success) {
+        setDriveFiles(result.data);
+        setCurrentFolderId(folderId);
+        
+        // Save to cache
+        setFolderCache(prev => ({ ...prev, [folderId]: result.data }));
+        
+        // Update history if it's a new path
+        setFolderHistory(prev => {
+          const index = prev.findIndex(f => f.id === folderId);
+          if (index !== -1) {
+            return prev.slice(0, index + 1);
+          } else {
+            return [...prev, { id: folderId, name: folderName }];
+          }
+        });
+      } else {
+        setAlertMessage("Erro ao carregar arquivos: " + (result.error || "Verifique se as pastas do Google Drive estão configuradas corretamente e se você tem permissão de acesso."));
+      }
+    } catch (error) {
+      console.error("Erro ao listar arquivos:", error);
+      setAlertMessage("Falha na comunicação com o servidor.");
+    } finally {
+      setIsLoadingFiles(false);
+    }
+  };
+
   const exportToPDF = async () => {
     if (!dbUrl) {
-      alert("Configure a URL do Apps Script primeiro.");
+      setAlertMessage("Configure a URL do Apps Script primeiro.");
       return;
     }
     
@@ -266,13 +385,13 @@ const App: React.FC = () => {
       
       const result = await response.json();
       if (result.success) {
-        alert("Fichas exportadas com sucesso!");
+        setAlertMessage("Fichas exportadas com sucesso!");
       } else {
-        alert("Erro ao exportar: " + result.error);
+        setAlertMessage("Erro ao exportar: " + (result.error || "Verifique se as pastas do Google Drive estão configuradas corretamente e se você tem permissão de acesso."));
       }
     } catch (error) {
       console.error("Erro na exportação:", error);
-      alert("Erro ao comunicar com o servidor.");
+      setAlertMessage("Erro ao comunicar com o servidor.");
     } finally {
       setIsSyncing(false);
     }
@@ -329,9 +448,10 @@ const App: React.FC = () => {
     if (localData) {
       try {
         const parsed = JSON.parse(localData);
+        // Remove dbUrl from local storage to prevent old links from causing issues
         if (parsed.dbUrl) {
-          initialUrl = parsed.dbUrl;
-          setDbUrl(parsed.dbUrl);
+          delete parsed.dbUrl;
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
         }
         if (parsed.folderRegId) setFolderRegId(parsed.folderRegId);
         if (parsed.folderFixoId) setFolderFixoId(parsed.folderFixoId);
@@ -382,7 +502,7 @@ const App: React.FC = () => {
       setState(prev => ({ ...prev, view: 'ADMIN' }));
       setAdminPassword('');
     } else {
-      alert('Senha incorreta!');
+      setAlertMessage('Senha incorreta!');
     }
   };
 
@@ -391,7 +511,7 @@ const App: React.FC = () => {
     const link = `${window.location.origin}${window.location.pathname}?t=${timestamp}`;
     setGeneratedLink(link);
     navigator.clipboard.writeText(link);
-    alert('Link de acesso válido por 24h copiado!');
+    setAlertMessage('Link de acesso válido por 24h copiado!');
   };
 
   const submitRequest = () => {
@@ -412,7 +532,7 @@ const App: React.FC = () => {
     const sector = sectors.find(s => String(s.id) === String(employee?.sectorId || targetSectorId));
     
     if (targetFlowType === EmployeeType.REGISTRADO && !employee) {
-      alert("Erro: Dados do funcionário não encontrados para recálculo.");
+      setAlertMessage("Erro: Dados do funcionário não encontrados para recálculo.");
       return;
     }
 
@@ -661,6 +781,7 @@ const App: React.FC = () => {
     { id: 'EMPLOYEES', label: 'Func.', icon: Users },
     { id: 'REQUESTS', label: 'Solicit.', icon: ClipboardList },
     { id: 'INTEGRATIONS', label: 'Sync', icon: Database },
+    { id: 'FILES', label: 'Arquivos', icon: Folder },
   ];
 
   const appsScriptCode = `
@@ -727,8 +848,20 @@ function doPost(e) {
       return ContentService.createTextOutput(JSON.stringify({ success: true }))
         .setMimeType(ContentService.MimeType.JSON);
     }
+    
+    if (body.action === "FECHAMENTO_SEMANAL") {
+      executarFechamentoSemanalAPI(body.data.folderRegId, body.data.folderFixoId);
+      return ContentService.createTextOutput(JSON.stringify({ success: true }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+    
+    if (body.action === "LIST_FILES") {
+      const result = listDriveFiles(body.data.folderId);
+      return ContentService.createTextOutput(JSON.stringify({ success: true, data: result }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
   } catch (error) {
-    return ContentService.createTextOutput(JSON.stringify({ success: false, error: error.message }))
+    return ContentService.createTextOutput(JSON.stringify({ success: false, error: String(error) }))
       .setMimeType(ContentService.MimeType.JSON);
   } finally {
     lock.releaseLock();
@@ -905,7 +1038,7 @@ function executarFechamentoSemanal() {
     exportarFolhasSextaFeira();
     SpreadsheetApp.flush(); 
   } catch (e) {
-    ui.alert("Erro durante a exportação: " + e.message);
+    ui.alert("Erro durante a exportação: " + String(e));
     return;
   }
 
@@ -930,13 +1063,98 @@ function executarFechamentoSemanal() {
   abasParaLimpar.forEach(nome => {
     const aba = ss.getSheetByName(nome);
     if (aba) {
-      let matriz = aba.getDataRange().getValues();
+      let range = aba.getDataRange();
+      let matriz = range.getValues();
+      let formulas = range.getFormulas(); // Coleta as fórmulas para não apagá-las
+      
       limparMatriz(matriz, nome.includes("REGISTRADO") ? "REGISTRADO" : "FIXO");
+      
+      restaurarFormulas(matriz, formulas); // Restaura as fórmulas antes de salvar
       aba.getRange(1, 1, matriz.length, matriz[0].length).setValues(matriz);
     }
   });
 
   ui.alert("Fechamento concluído com sucesso!");
+}
+
+function executarFechamentoSemanalAPI(paramFolderRegId, paramFolderFixoId) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  try {
+    // 1. Exporta antes de apagar os dados
+    exportarFolhasSextaFeira(paramFolderRegId, paramFolderFixoId);
+    SpreadsheetApp.flush(); 
+  } catch (e) {
+    throw new Error("Erro durante a exportação: " + String(e));
+  }
+
+  // 2. Backup e Limpa o banco de dados (Solicitacoes)
+  const abaSolicitacoes = ss.getSheetByName("Solicitacoes");
+  if (abaSolicitacoes && abaSolicitacoes.getLastRow() > 1) {
+    let abaBackup = ss.getSheetByName("BACKUP");
+    if (!abaBackup) {
+      abaBackup = ss.insertSheet("BACKUP");
+      let headers = abaSolicitacoes.getRange(1, 1, 1, abaSolicitacoes.getLastColumn()).getValues();
+      abaBackup.getRange(1, 1, 1, headers[0].length).setValues(headers);
+    }
+    
+    let dadosParaBackup = abaSolicitacoes.getRange(2, 1, abaSolicitacoes.getLastRow() - 1, abaSolicitacoes.getLastColumn()).getValues();
+    abaBackup.getRange(abaBackup.getLastRow() + 1, 1, dadosParaBackup.length, dadosParaBackup[0].length).setValues(dadosParaBackup);
+
+    abaSolicitacoes.getRange(2, 1, abaSolicitacoes.getLastRow() - 1, abaSolicitacoes.getLastColumn()).clearContent();
+  }
+
+  // 3. Limpa as abas visuais (Fichas)
+  const abasParaLimpar = ["HE - REGISTRADO", "HE - FIXO"];
+  abasParaLimpar.forEach(nome => {
+    const aba = ss.getSheetByName(nome);
+    if (aba) {
+      let range = aba.getDataRange();
+      let matriz = range.getValues();
+      let formulas = range.getFormulas(); // Coleta as fórmulas para não apagá-las
+      
+      limparMatriz(matriz, nome.includes("REGISTRADO") ? "REGISTRADO" : "FIXO");
+      
+      restaurarFormulas(matriz, formulas); // Restaura as fórmulas antes de salvar
+      aba.getRange(1, 1, matriz.length, matriz[0].length).setValues(matriz);
+    }
+  });
+}
+
+function extractFolderId(input) {
+  if (!input) return '';
+  const match = String(input).match(/[-\w]{15,}/);
+  return match ? match[0] : input;
+}
+
+function listDriveFiles(folderId) {
+  if (!folderId) return { folders: [], files: [] };
+  const cleanId = extractFolderId(folderId);
+  try {
+    const folder = DriveApp.getFolderById(cleanId);
+    const folders = [];
+    const files = [];
+    
+    const subFolders = folder.getFolders();
+    while (subFolders.hasNext()) {
+      const sub = subFolders.next();
+      folders.push({ id: sub.getId(), name: sub.getName() });
+    }
+    
+    const folderFiles = folder.getFiles();
+    while (folderFiles.hasNext()) {
+      const file = folderFiles.next();
+      files.push({ id: file.getId(), name: file.getName(), url: file.getUrl() });
+    }
+    
+    return { folders, files };
+  } catch (e) {
+    let errorMsg = "Erro ao listar arquivos: " + String(e);
+    if (String(e).includes("Access denied") || String(e).includes("No item with the given ID")) {
+      errorMsg += "\\n\\n(DICA IMPORTANTE: O Google Apps Script não tem permissão para acessar esta pasta. Se você tem certeza que o ID está correto, o problema é a forma como o script foi implantado.\\n\\nSolução: No Apps Script, vá em 'Implantar' > 'Gerenciar implantações' > Editar (lápis) > Em 'Executar como', mude para 'Usuário que acessa o aplicativo web'. Salve e tente novamente.)";
+    }
+    throw new Error(errorMsg);
+  }
 }
 
 /**
@@ -948,25 +1166,45 @@ function executarFechamentoSemanal() {
 function exportarFolhasSextaFeira(paramFolderRegId, paramFolderFixoId) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const props = PropertiesService.getScriptProperties();
-  const PASTA_REGISTRADO_ID = paramFolderRegId || props.getProperty('FOLDER_REG_ID') || "1OGOxVmi2nEwI47HP9l48VdVBKQeJTVqm";
-  const PASTA_FIXO_ID = paramFolderFixoId || props.getProperty('FOLDER_FIXO_ID') || "1RzzDCHznw97QxwDLh_qvf8NE8yKPNdWU";
+  const PASTA_REGISTRADO_ID = extractFolderId(paramFolderRegId || props.getProperty('FOLDER_REG_ID') || "1OGOxVmi2nEwI47HP9l48VdVBKQeJTVqm");
+  const PASTA_FIXO_ID = extractFolderId(paramFolderFixoId || props.getProperty('FOLDER_FIXO_ID') || "1RzzDCHznw97QxwDLh_qvf8NE8yKPNdWU");
 
-  // Nome da pasta do dia (Ex: 24-02)
-  const dataPasta = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd-MM");
+  const hoje = new Date();
+  const ano = Utilities.formatDate(hoje, Session.getScriptTimeZone(), "yyyy");
+  
+  // Array com nomes dos meses em português
+  const meses = ["JANEIRO", "FEVEREIRO", "MARÇO", "ABRIL", "MAIO", "JUNHO", "JULHO", "AGOSTO", "SETEMBRO", "OUTUBRO", "NOVEMBRO", "DEZEMBRO"];
+  const mesNome = meses[hoje.getMonth()];
+  
+  const dataPasta = Utilities.formatDate(hoje, Session.getScriptTimeZone(), "dd-MM");
 
-  function obterOuCriarSubpasta(idPastaPai, nomeSubpasta) {
-    const pastaPai = DriveApp.getFolderById(idPastaPai);
+  function obterOuCriarSubpasta(pastaPai, nomeSubpasta) {
     const subpastas = pastaPai.getFoldersByName(nomeSubpasta);
     return subpastas.hasNext() ? subpastas.next() : pastaPai.createFolder(nomeSubpasta);
   }
 
   try {
-    const pReg = obterOuCriarSubpasta(PASTA_REGISTRADO_ID, dataPasta);
+    // Para HE - REGISTRADO
+    const pastaRaizReg = DriveApp.getFolderById(PASTA_REGISTRADO_ID);
+    const pastaAnoReg = obterOuCriarSubpasta(pastaRaizReg, ano);
+    const pastaMesReg = obterOuCriarSubpasta(pastaAnoReg, mesNome);
+    const pReg = obterOuCriarSubpasta(pastaMesReg, dataPasta);
     processarExportacaoIndividual(ss, "HE - REGISTRADO", "REGISTRADO", pReg);
     
-    const pFix = obterOuCriarSubpasta(PASTA_FIXO_ID, dataPasta);
+    // Para HE - FIXO
+    const pastaRaizFixo = DriveApp.getFolderById(PASTA_FIXO_ID);
+    const pastaAnoFixo = obterOuCriarSubpasta(pastaRaizFixo, ano);
+    const pastaMesFixo = obterOuCriarSubpasta(pastaAnoFixo, mesNome);
+    const pFix = obterOuCriarSubpasta(pastaMesFixo, dataPasta);
     processarExportacaoIndividual(ss, "HE - FIXO", "FIXO", pFix);
-  } catch(e) { console.error("Erro na exportação: " + e); }
+  } catch(e) { 
+    console.error("Erro na exportação: " + e);
+    let errorMsg = "Erro ao acessar pastas do Drive ou exportar arquivos: " + String(e);
+    if (String(e).includes("Access denied") || String(e).includes("No item with the given ID")) {
+      errorMsg += "\\n\\n(DICA IMPORTANTE: O Google Apps Script não tem permissão para acessar esta pasta. Se você tem certeza que o ID está correto, o problema é a forma como o script foi implantado.\\n\\nSolução: No Apps Script, vá em 'Implantar' > 'Gerenciar implantações' > Editar (lápis) > Em 'Executar como', mude para 'Usuário que acessa o aplicativo web'. Salve e tente novamente.)";
+    }
+    throw new Error(errorMsg);
+  }
 }
 
 function processarExportacaoIndividual(ss, nomeAba, tipo, pastaDestino) {
@@ -1075,8 +1313,7 @@ function gerarNovoArquivoSheets(nomeArquivo, rangeOrigem, pastaDestino) {
   SpreadsheetApp.flush();
   
   let arquivo = DriveApp.getFileById(novoSS.getId());
-  pastaDestino.addFile(arquivo);
-  DriveApp.getRootFolder().removeFile(arquivo);
+  arquivo.moveTo(pastaDestino);
 }
 
 /**
@@ -1165,42 +1402,12 @@ function processarHEsAprovadas(ss, requests) {
   const aprovados = requests.filter(r => (r.status || "").toUpperCase().trim() === "APROVADO");
   const agrupados = agruparSolicitacoesPorFuncionario(aprovados);
 
-  let dataSegunda = null;
-  let dataDomingo = null;
-  if (aprovados.length > 0) {
-    let req = aprovados[0];
-    let dStr = req.weekStarting;
-    if (!dStr) {
-      let recs = parseRecords(req.records);
-      if (recs.length > 0) dStr = recs[0].date;
-    }
-    if (dStr) {
-      let p = dStr.split("-");
-      let d = new Date(p[0], p[1] - 1, p[2], 12, 0, 0);
-      let diaSemana = d.getDay();
-      let diffParaSegunda = diaSemana === 0 ? -6 : 1 - diaSemana;
-      d.setDate(d.getDate() + diffParaSegunda);
-      dataSegunda = Utilities.formatDate(d, Session.getScriptTimeZone(), "dd/MM/yyyy");
-      d.setDate(d.getDate() + 6);
-      dataDomingo = Utilities.formatDate(d, Session.getScriptTimeZone(), "dd/MM/yyyy");
-    }
-  }
-
   const abaReg = ss.getSheetByName("HE - REGISTRADO");
   if (abaReg) {
     let range = abaReg.getDataRange();
     let matriz = range.getValues();
     let formulas = range.getFormulas(); 
     limparMatriz(matriz, "REGISTRADO");
-    
-    if (dataSegunda && dataDomingo) {
-      for (let i = 0; i < matriz.length; i++) {
-        if (matriz[i] && (matriz[i][6] || "").toString().toUpperCase().trim() === "DATA") {
-          matriz[i][7] = dataSegunda;
-          matriz[i][9] = dataDomingo;
-        }
-      }
-    }
     
     agrupados.filter(r => r.employeeType.toUpperCase().trim() === "REGISTRADO").forEach(req => {
       let rIdx = localizarFichaVaziaNaMatriz(matriz, 0, 1);
@@ -1220,18 +1427,6 @@ function processarHEsAprovadas(ss, requests) {
     let matriz = range.getValues();
     let formulas = range.getFormulas(); 
     limparMatriz(matriz, "FIXO");
-    
-    if (dataSegunda && dataDomingo) {
-      for (let i = 0; i < matriz.length; i += 65) {
-        if (matriz[i]) {
-          // Ensure the row has enough columns if it somehow doesn't, though it should.
-          // To keep it rectangular, we only assign if the column exists or we rely on the sheet having enough columns.
-          // Since HE-FIXO uses up to column L (index 11), it will have enough columns.
-          matriz[i][7] = dataSegunda;
-          matriz[i][10] = dataDomingo;
-        }
-      }
-    }
     
     agrupados.filter(r => r.employeeType.toUpperCase().trim() === "FIXO").forEach(func => {
       let fIdx = -1; let colBase = -1; 
@@ -1313,8 +1508,6 @@ function preencherHorasNaMatriz(matriz, formulas, linhaInicio, records, col) {
     if (preenchidas < 7) {
       let r = linhaInicio + preenchidas;
       if (matriz[r]) {
-        let p = diasComDados[i].date.split("-");
-        matriz[r][col] = new Date(p[0], p[1]-1, p[2], 12, 0, 0);
         matriz[r][col + 1] = diasComDados[i].realEntry || "";
         matriz[r][col + 2] = diasComDados[i].realExit || "";  
         let lE = (col === 0) ? "B" : "I"; let lS = (col === 0) ? "C" : "J";
@@ -1335,13 +1528,13 @@ function preencherColunaAERegistros(matriz, formulas, linhaInicio, records) {
   let diffParaSegunda = diaSemana === 0 ? -6 : 1 - diaSemana;
   let dataRef = new Date(dataRefOriginal);
   dataRef.setDate(dataRefOriginal.getDate() + diffParaSegunda);
-  const diasExtenso = ["DOMINGO", "SEGUNDA-FEIRA", "TERÇA-FEIRA", "QUARTA-FEIRA", "QUINTA-FEIRA", "SEXTA-FEIRA", "SÁBADO"];
+  
   for (let i = 0; i < 7; i++) {
     let r = linhaInicio + i;
     if (!matriz[r]) continue;
     let dataLoop = new Date(dataRef);
     dataLoop.setDate(dataRef.getDate() + i);
-    matriz[r][0] = diasExtenso[dataLoop.getDay()];
+    
     let sBusca = Utilities.formatDate(dataLoop, Session.getScriptTimeZone(), "yyyy-MM-dd");
     let reg = horas.find(h => h.date === sBusca);
     if (reg) {
@@ -1704,7 +1897,7 @@ function testeManual() {
                     <div><h3 className="text-xl font-bold text-gray-800 dark:text-gray-200">Link de Acesso (24h)</h3><p className="text-sm text-gray-500 dark:text-gray-400">Cria um link temporário para preenchimento externo.</p></div>
                     <button onClick={generateAccessLink} className="w-full md:w-auto bg-blue-600 text-white px-6 py-3 rounded-xl font-bold flex items-center justify-center gap-2 shadow-lg hover:bg-blue-700 transition active:scale-95"><Share2 className="w-5 h-5" /> Gerar Link</button>
                   </div>
-                  {generatedLink && <div className="flex items-center gap-2 bg-white dark:bg-gray-900 p-4 rounded-xl border border-blue-100 dark:border-gray-700"><input readOnly value={generatedLink} className="flex-1 text-xs text-gray-400 dark:text-gray-500 bg-transparent outline-none font-mono" /><button onClick={() => { navigator.clipboard.writeText(generatedLink); alert('Copiado!'); }} className="text-blue-600 dark:text-blue-400 p-2"><Copy className="w-4 h-4" /></button></div>}
+                  {generatedLink && <div className="flex items-center gap-2 bg-white dark:bg-gray-900 p-4 rounded-xl border border-blue-100 dark:border-gray-700"><input readOnly value={generatedLink} className="flex-1 text-xs text-gray-400 dark:text-gray-500 bg-transparent outline-none font-mono" /><button onClick={() => { navigator.clipboard.writeText(generatedLink); setAlertMessage('Copiado!'); }} className="text-blue-600 dark:text-blue-400 p-2"><Copy className="w-4 h-4" /></button></div>}
                 </div>
                 <div className="p-6 md:p-8 border border-gray-100 dark:border-gray-700 rounded-3xl bg-gray-50/50 dark:bg-gray-900/50 space-y-4">
                   <h3 className="text-xl font-bold text-gray-800 dark:text-gray-200">Endpoint da Planilha</h3>
@@ -1713,6 +1906,12 @@ function testeManual() {
                   <div className="flex flex-col md:flex-row gap-3">
                     <button onClick={() => loadDatabase()} className="flex-1 bg-white dark:bg-gray-800 border border-blue-600 dark:border-blue-500 text-blue-600 dark:text-blue-400 px-6 py-4 rounded-xl font-bold active:bg-blue-50 dark:active:bg-gray-700 transition">Importar</button>
                     <button onClick={exportToPDF} className="flex-1 bg-blue-600 text-white px-8 py-4 rounded-xl font-bold shadow-lg active:scale-95 transition">Exportar</button>
+                  </div>
+                  <div className="mt-4">
+                    <button onClick={executarFechamentoSemanal} className="w-full bg-red-600 hover:bg-red-700 text-white px-8 py-4 rounded-xl font-bold shadow-lg active:scale-95 transition flex items-center justify-center gap-2">
+                      <AlertCircle className="w-5 h-5" />
+                      FECHAMENTO SEMANAL (Salvar + Limpar Tudo)
+                    </button>
                   </div>
                 </div>
 
@@ -1723,24 +1922,130 @@ function testeManual() {
                   <div className="space-y-4">
                     <div>
                       <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-1">ID da Pasta (HE Registrado)</label>
-                      <input type="text" className="w-full p-3 border dark:border-gray-700 rounded-xl bg-white dark:bg-gray-800 text-black dark:text-white outline-none text-sm font-mono focus:border-blue-500" value={folderRegId} onChange={(e) => { setFolderRegId(e.target.value); }} />
+                      <input type="text" className="w-full p-3 border dark:border-gray-700 rounded-xl bg-white dark:bg-gray-800 text-black dark:text-white outline-none text-sm font-mono focus:border-blue-500" value={folderRegId} onChange={(e) => { setFolderRegId(extractFolderId(e.target.value)); }} />
                     </div>
                     <div>
                       <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-1">ID da Pasta (HE Fixo)</label>
-                      <input type="text" className="w-full p-3 border dark:border-gray-700 rounded-xl bg-white dark:bg-gray-800 text-black dark:text-white outline-none text-sm font-mono focus:border-blue-500" value={folderFixoId} onChange={(e) => { setFolderFixoId(e.target.value); }} />
+                      <input type="text" className="w-full p-3 border dark:border-gray-700 rounded-xl bg-white dark:bg-gray-800 text-black dark:text-white outline-none text-sm font-mono focus:border-blue-500" value={folderFixoId} onChange={(e) => { setFolderFixoId(extractFolderId(e.target.value)); }} />
                     </div>
                   </div>
 
                   <div className="mt-8">
                     <div className="flex items-center justify-between mb-2">
                       <h4 className="font-bold text-gray-800 dark:text-gray-200">Código do Apps Script</h4>
-                      <button onClick={() => { navigator.clipboard.writeText(appsScriptCode); alert('Código copiado!'); }} className="text-blue-600 dark:text-blue-400 text-sm font-bold flex items-center gap-1 hover:text-blue-800 dark:hover:text-blue-300"><Copy className="w-4 h-4" /> Copiar Código</button>
+                      <button onClick={() => { navigator.clipboard.writeText(appsScriptCode); setAlertMessage('Código copiado!'); }} className="text-blue-600 dark:text-blue-400 text-sm font-bold flex items-center gap-1 hover:text-blue-800 dark:hover:text-blue-300"><Copy className="w-4 h-4" /> Copiar Código</button>
                     </div>
                     <div className="bg-gray-900 rounded-xl p-4 overflow-x-auto">
                       <pre className="text-xs text-green-400 font-mono whitespace-pre-wrap">{appsScriptCode}</pre>
                     </div>
                   </div>
                 </div>
+              </div>
+            )}
+
+            {state.adminSubView === 'FILES' && (
+              <div className="bg-white dark:bg-gray-800 p-6 md:p-8 rounded-3xl border border-gray-100 dark:border-gray-700 space-y-8">
+                <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+                  <h2 className="text-2xl font-bold dark:text-white flex items-center gap-2"><Folder className="text-blue-600 dark:text-blue-400" /> Arquivos Salvos</h2>
+                  <div className="flex flex-wrap gap-2 w-full md:w-auto">
+                    <button onClick={() => fetchDriveFiles(folderRegId, 'HE Registrado')} className="flex-1 md:flex-none bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 px-4 py-2 rounded-lg font-bold hover:bg-blue-100 dark:hover:bg-blue-900/50 transition">Ver HE Registrado</button>
+                    <button onClick={() => fetchDriveFiles(folderFixoId, 'HE Fixo')} className="flex-1 md:flex-none bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 px-4 py-2 rounded-lg font-bold hover:bg-blue-100 dark:hover:bg-blue-900/50 transition">Ver HE Fixo</button>
+                    <div className="flex bg-gray-100 dark:bg-gray-800 rounded-lg p-1 ml-auto md:ml-2">
+                      <button onClick={() => setFileViewMode('list')} className={`p-1.5 rounded-md transition ${fileViewMode === 'list' ? 'bg-white dark:bg-gray-700 text-blue-600 dark:text-blue-400 shadow-sm' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}`} title="Lista"><List className="w-5 h-5" /></button>
+                      <button onClick={() => setFileViewMode('grid')} className={`p-1.5 rounded-md transition ${fileViewMode === 'grid' ? 'bg-white dark:bg-gray-700 text-blue-600 dark:text-blue-400 shadow-sm' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}`} title="Grade"><Grid className="w-5 h-5" /></button>
+                    </div>
+                  </div>
+                </div>
+
+                {isLoadingFiles ? (
+                  <div className="flex justify-center items-center p-12">
+                    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+                  </div>
+                ) : currentFolderId ? (
+                  <div className="space-y-4">
+                    {/* Breadcrumbs */}
+                    <div className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-900 p-3 rounded-xl overflow-x-auto">
+                      {folderHistory.map((folder, index) => (
+                        <div key={folder.id} className="flex items-center gap-2 whitespace-nowrap">
+                          {index > 0 && <span>/</span>}
+                          <button 
+                            onClick={() => fetchDriveFiles(folder.id, folder.name)}
+                            className={`hover:text-blue-600 dark:hover:text-blue-400 transition ${index === folderHistory.length - 1 ? 'font-bold text-gray-900 dark:text-gray-100' : ''}`}
+                          >
+                            {folder.name}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Folders and Files List */}
+                    <div className="bg-gray-50 dark:bg-gray-900 rounded-2xl border border-gray-100 dark:border-gray-700 overflow-hidden">
+                      {driveFiles.folders.length === 0 && driveFiles.files.length === 0 ? (
+                        <div className="p-8 text-center text-gray-500 dark:text-gray-400">
+                          Pasta vazia
+                        </div>
+                      ) : fileViewMode === 'list' ? (
+                        <ul className="divide-y divide-gray-100 dark:divide-gray-800">
+                          {driveFiles.folders.map(folder => (
+                            <li key={folder.id}>
+                              <button 
+                                onClick={() => fetchDriveFiles(folder.id, folder.name)}
+                                className="w-full flex items-center gap-3 p-4 hover:bg-gray-100 dark:hover:bg-gray-800 transition text-left"
+                              >
+                                <Folder className="w-5 h-5 text-blue-500 flex-shrink-0" />
+                                <span className="font-medium text-gray-800 dark:text-gray-200 truncate">{folder.name}</span>
+                              </button>
+                            </li>
+                          ))}
+                          {driveFiles.files.map(file => (
+                            <li key={file.id}>
+                              <a 
+                                href={file.url} 
+                                target="_blank" 
+                                rel="noopener noreferrer"
+                                className="w-full flex items-center gap-3 p-4 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
+                              >
+                                <FileText className="w-5 h-5 text-red-500 flex-shrink-0" />
+                                <span className="font-medium text-gray-800 dark:text-gray-200 truncate">{file.name}</span>
+                              </a>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 p-4">
+                          {driveFiles.folders.map(folder => (
+                            <button 
+                              key={folder.id}
+                              onClick={() => fetchDriveFiles(folder.id, folder.name)}
+                              className="flex flex-col items-center justify-center p-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-100 dark:border-gray-700 hover:border-blue-300 dark:hover:border-blue-700 hover:shadow-md transition gap-3 text-center group"
+                            >
+                              <Folder className="w-10 h-10 text-blue-500 group-hover:scale-110 transition-transform" />
+                              <span className="font-medium text-sm text-gray-800 dark:text-gray-200 line-clamp-2">{folder.name}</span>
+                            </button>
+                          ))}
+                          {driveFiles.files.map(file => (
+                            <a 
+                              key={file.id}
+                              href={file.url} 
+                              target="_blank" 
+                              rel="noopener noreferrer"
+                              className="flex flex-col items-center justify-center p-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-100 dark:border-gray-700 hover:border-red-300 dark:hover:border-red-700 hover:shadow-md transition gap-3 text-center group"
+                            >
+                              <FileText className="w-10 h-10 text-red-500 group-hover:scale-110 transition-transform" />
+                              <span className="font-medium text-sm text-gray-800 dark:text-gray-200 line-clamp-2">{file.name}</span>
+                            </a>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-center p-12 border-2 border-dashed border-gray-200 dark:border-gray-700 rounded-3xl">
+                    <Folder className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+                    <h3 className="text-lg font-bold text-gray-800 dark:text-gray-200 mb-2">Nenhuma pasta selecionada</h3>
+                    <p className="text-gray-500 dark:text-gray-400">Selecione uma das pastas acima para visualizar os arquivos.</p>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -1792,6 +2097,29 @@ function testeManual() {
             <div className="mt-4 pt-4 border-t border-gray-100 dark:border-gray-700 flex gap-3 bg-white dark:bg-gray-800 sticky bottom-0 z-10 pb-6 md:pb-0">
                 <button onClick={() => { setShowFormModal(false); setEditingRequestId(null); }} className="flex-1 py-4 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 font-bold rounded-xl active:scale-95 transition">Cancelar</button>
                 <button onClick={submitRequest} className="flex-[2] py-4 bg-blue-600 text-white font-bold rounded-xl shadow-lg active:scale-95 transition">Salvar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Alert Modal */}
+      {alertMessage && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-xl max-w-sm w-full text-center space-y-4">
+            <p className="text-gray-800 dark:text-gray-200 font-medium">{alertMessage}</p>
+            <button onClick={() => setAlertMessage(null)} className="w-full bg-blue-600 text-white py-3 rounded-xl font-bold hover:bg-blue-700 transition">OK</button>
+          </div>
+        </div>
+      )}
+
+      {/* Confirm Modal */}
+      {confirmDialog && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-xl max-w-sm w-full text-center space-y-6">
+            <p className="text-gray-800 dark:text-gray-200 font-medium whitespace-pre-line">{confirmDialog.message}</p>
+            <div className="flex gap-3">
+              <button onClick={() => setConfirmDialog(null)} className="flex-1 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 py-3 rounded-xl font-bold hover:bg-gray-200 dark:hover:bg-gray-600 transition">Cancelar</button>
+              <button onClick={() => { confirmDialog.onConfirm(); setConfirmDialog(null); }} className="flex-1 bg-red-600 text-white py-3 rounded-xl font-bold hover:bg-red-700 transition">Confirmar</button>
             </div>
           </div>
         </div>
