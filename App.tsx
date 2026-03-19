@@ -64,7 +64,7 @@ import {
 
 // Constantes
 const STORAGE_KEY = 'controle_horas_db_v3';
-const DEFAULT_SHEET_URL = 'https://script.google.com/macros/s/AKfycbyrqGVolBmkd1CYPXyw2poaS3JdO4i6P702u8CPR8HlTJg2vUWEj_WxKGO4KND515WD/exec';
+const DEFAULT_SHEET_URL = 'https://script.google.com/macros/s/AKfycby3TJGwqYjXMWyysi7CgHeNI48Kpmr8fCeFv3Ozr7252RvxdcNwlaNoRkgJYZHb2Il8/exec';
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
 
 const App: React.FC = () => {
@@ -1508,6 +1508,11 @@ function preencherHorasNaMatriz(matriz, formulas, linhaInicio, records, col) {
     if (preenchidas < 7) {
       let r = linhaInicio + preenchidas;
       if (matriz[r]) {
+        // Formata a data de YYYY-MM-DD para DD/MM/YYYY
+        let partes = diasComDados[i].date.split("-");
+        let dataFormatada = partes[2] + "/" + partes[1] + "/" + partes[0];
+        
+        matriz[r][col] = dataFormatada;
         matriz[r][col + 1] = diasComDados[i].realEntry || "";
         matriz[r][col + 2] = diasComDados[i].realExit || "";  
         let lE = (col === 0) ? "B" : "I"; let lS = (col === 0) ? "C" : "J";
